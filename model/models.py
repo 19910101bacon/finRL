@@ -84,14 +84,15 @@ def DRL_prediction(df,
                    name,
                    last_state,
                    iter_num,
-                   unique_trade_date,
+                   start_timestamp,
+                   end_timestamp,
                    rebalance_window,
                    turbulence_threshold,
                    initial):
     ### make a prediction based on trained model###
 
     ## trading env
-    trade_data = data_split(df, start=unique_trade_date[iter_num - rebalance_window], end=unique_trade_date[iter_num])
+    trade_data = data_split(df, start=start_timestamp, end=end_timestamp)
     env_trade = DummyVecEnv([lambda: StockEnvTrade(trade_data,
                                                    turbulence_threshold=turbulence_threshold,
                                                    initial=initial,
@@ -146,6 +147,8 @@ def run_ensemble_strategy(all_ohlcv) -> None:
 
     start = time.time()
     test_timestamp_list = all_ohlcv.query(f'timestamp >= "{config.TEST_TIMESTAMP}"').timestamp.unique()
+
+    # define BATCH info , output: test_info_set
     test_info_set = {}
     temp_range = range(
         config.REBALANCE_WINDOW_TIMESTAMPE_NUM + config.VALIDATION_WINDOW_TIMESTAMPE_NUM,
@@ -205,6 +208,52 @@ def run_ensemble_strategy(all_ohlcv) -> None:
         DRL_validation(model=model_a2c, test_data=validation, test_env=env_val, test_obs=obs_val)
         sharpe_a2c = get_validation_sharpe(batch_id)
         print("A2C Sharpe Ratio: ", sharpe_a2c)
+
+        print("======PPO Training========")
+        model_ppo = train_PPO(env_train, model_name="PPO_100k_dow_{}".format(batch_id), timesteps=100000)
+        print("======PPO Validation from: ", end_timestamp)
+        DRL_validation(model=model_ppo, test_data=validation, test_env=env_val, test_obs=obs_val)
+        sharpe_ppo = get_validation_sharpe(batch_id)
+        print("PPO Sharpe Ratio: ", sharpe_ppo)
+
+        print("======DDPG Training========")
+        model_ddpg = train_DDPG(env_train, model_name="DDPG_10k_dow_{}".format(batch_id), timesteps=10000)
+        # model_ddpg = train_TD3(env_train, model_name="DDPG_10k_dow_{}".format(i), timesteps=20000)
+        print("======DDPG Validation from: ", end_timestamp)
+        DRL_validation(model=model_ddpg, test_data=validation, test_env=env_val, test_obs=obs_val)
+        sharpe_ddpg = get_validation_sharpe(batch_id)
+
+        ppo_sharpe_list.append(sharpe_ppo)
+        a2c_sharpe_list.append(sharpe_a2c)
+        ddpg_sharpe_list.append(sharpe_ddpg)
+
+        # Model Selection based on sharpe ratio
+        if (sharpe_ppo >= sharpe_a2c) & (sharpe_ppo >= sharpe_ddpg):
+            model_ensemble = model_ppo
+            model_use.append('PPO')
+        elif (sharpe_a2c > sharpe_ppo) & (sharpe_a2c > sharpe_ddpg):
+            model_ensemble = model_a2c
+            model_use.append('A2C')
+        else:
+            model_ensemble = model_ddpg
+            model_use.append('DDPG')
+        ############## Training and Validation ends ##############
+
+        ############## Trading starts ##############
+        print("======Trading from: ", end_timestamp)
+        # print("Used Model: ", model_ensemble)
+        last_state_ensemble = DRL_prediction(df=all_ohlcv, model=model_ensemble, name="ensemble",
+                                             last_state=last_state_ensemble, iter_num=batch_id,
+                                             start_timestamp=start_timestamp,
+                                             end_timestamp=end_timestamp,
+                                             rebalance_window=config.REBALANCE_WINDOW_TIMESTAMPE_NUM,
+                                             turbulence_threshold=turbulence_threshold,
+                                             initial=initial)
+        # print("============Trading Done============")
+        ############## Trading ends ##############
+
+    end = time.time()
+    print("Ensemble Strategy took: ", (end - start) / 60, " minutes")
 
 
     # """Ensemble Strategy that combines PPO, A2C and DDPG"""
